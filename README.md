@@ -28,4 +28,4 @@ database_path = "$HOME/<your database path>"
 
 ### Contributing
 
-This is literally the first time I'm doing anything with PAM, so I'd appreciate if someone would point out all the terrible mistakes I'm probably making :D
+This is literally the first time I'm doing anything with PAM, so I'd appreciate it if someone would point out all the terrible mistakes I'm probably making :D
