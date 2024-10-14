@@ -1,0 +1,21 @@
+[package]
+name = "pam-keepassxc"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
+[dependencies]
+pamsm = { version = "0.5", features = ["libpam"] }
+serde = { version = "1.0.210", features = ["derive"] }
+toml = "0.8.19"
+users = { version = "0.11.0", default-features = false }
+zbus = { version = "4.4", default-features = false, features = ["async-io", "blocking"] }
