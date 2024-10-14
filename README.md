@@ -15,7 +15,7 @@ Suggested configuration:
 
 Install the `libpam_keepassxc.so` library to `/usr/lib/security/pam_keepassxc.so`.
 
-Adjust your `/etc/pam.d/swaylock` or equivalent to add the following line, right after any other `auth` line.
+Adjust your `/etc/pam.d/swaylock` or equivalent to add the following line, as the very last `auth` entry in the file.
 ```
 auth optional pam_keepassxc.so
 ```
