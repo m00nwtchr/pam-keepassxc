@@ -9,7 +9,7 @@ Currently, this only works for in-session authentication, IE with session locker
 
 Suggested configuration:
 - Setup autologin,
-- Use `swaylock` as a "login screen" on session start with e.g. `exec swaylock`
+- Use `swaylock` as a "login screen" on session start with e.g. `exec swaylock` in `sway`'s configuration.
 - Make sure KeePassXC is started on login as well, in any way you choose.
 
 ### Configuration
