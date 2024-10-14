@@ -4,6 +4,7 @@ A PAM module for KeePassXC auto-unlocking.
 ## WARNING: This is a very early (but functional) prototype. There are no guarantees regarding security or compatibility with your setup.
 
 ### REQUIREMENTS
+
 Currently, this only works for in-session authentication, IE with session lockers such as `swaylock`.
 
 Suggested configuration:
@@ -24,3 +25,7 @@ Create a `$HOME/.config/security/pam_keepassxc.toml` file, with the following co
 ```toml
 database_path = "$HOME/<your database path>"
 ```
+
+### Contributing
+
+This is literally the first time I'm doing anything with PAM, so I'd appreciate if someone would point out all the terrible mistakes I'm probably making :D
