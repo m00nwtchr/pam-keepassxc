@@ -13,9 +13,13 @@ codegen-units = 1
 opt-level = "z"
 panic = "abort"
 
+[features]
+default = ["session"]
+session = ["dep:fork"]
+
 [dependencies]
 basic-toml = "0.1.9"
-fork = "0.2.0"
+fork = { version = "0.2.0", optional = true }
 nix = { version = "0.26.4", features = ["socket"] }
 pamsm = { version = "0.5", features = ["libpam"] }
 rustbus = "0.19.3"

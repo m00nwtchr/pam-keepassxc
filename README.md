@@ -12,14 +12,14 @@ Install:
   -  Create a systemd service alias (symlink) from `keepassxc.service` to `dbus-org.keepassxc.KeePassXC.MainWindow.service`
   - `systemctl --user daemon-reload`
 
-AUR package with a correct example installation Soon:TM:
+See `aur/PKGBUILD` for an example.
 
 Adjust your `/etc/pam.d/swaylock` or equivalent to add the following line, as the very last `auth` entry in the file.
 ```
 auth optional pam_keepassxc.so
 ```
 
-For login managers such as `greetd`, do the above *and* also add the following line to your `/etc/pam.d/greetd`, in the same manner as the `auth` entry.
+For login managers such as `greetd`, do the above *and* also add the following line to your `/etc/pam.d/greetd`, right after every other `session` entry in the file.
 ```
 session optional pam_keepassxc.so
 ```

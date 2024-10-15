@@ -6,6 +6,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
+#[cfg(feature = "session")]
 use fork::{close_fd, fork, setsid, waitpid, Fork};
 use nix::sys::socket::UnixAddr;
 use pamsm::{pam_module, LogLvl, Pam, PamData, PamError, PamFlags, PamLibExt, PamServiceModule};
@@ -21,6 +22,7 @@ use users::{
 struct PamKeePassXC;
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "session")]
 struct SessionData(Option<String>);
 
 const MODULE_NAME: &str = "pam_keepassxc";
@@ -78,41 +80,61 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 	result
 }
 
+/**
+ * Will only return for the parent & grandchild
+**/
+#[cfg(feature = "session")]
+fn double_fork() -> Result<Fork, i32> {
+	return match fork() {
+		Ok(Fork::Parent(pid)) => {
+			let _ = waitpid(pid);
+
+			Ok(Fork::Parent(pid))
+		}
+		Ok(Fork::Child) => {
+			let _ = setsid();
+			let _ = close_fd();
+
+			match fork() {
+				Ok(Fork::Child) => return Ok(Fork::Child),
+				_ => exit(0),
+			}
+		}
+		a => a,
+	};
+}
+
 const TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "session")]
 fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) -> Result<(), i32> {
-	setsid()?;
-	close_fd()?;
+	let _ = set_effective_uid(get_current_uid());
+	let _ = set_effective_gid(get_current_gid());
 
-	if let Ok(Fork::Child) = fork() {
-		// grandchild
-		let _ = set_effective_uid(get_current_uid());
-		let _ = set_effective_gid(get_current_gid());
+	// Set gid first, then uid
+	let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
+	let _ = set_both_uid(user.uid(), user.uid());
 
-		// Set gid first, then uid
-		let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
-		let _ = set_both_uid(user.uid(), user.uid());
-
-		let database_path = database_path(&user, &user_config);
-		let start = Instant::now();
-		loop {
-			match unlock_keepassxc(&database_path, pass) {
-				Ok(_) => {
+	let database_path = database_path(&user, &user_config);
+	let start = Instant::now();
+	loop {
+		match unlock_keepassxc(&database_path, pass) {
+			Ok(_) => {
+				break;
+			}
+			Err(_) => {
+				if start.elapsed() >= TIMEOUT {
 					break;
 				}
-				Err(err) => {
-					if start.elapsed() >= TIMEOUT {
-						break;
-					}
-					sleep(Duration::from_secs(1));
-				}
+				sleep(Duration::from_secs(1));
 			}
 		}
 	}
 
-	exit(0);
+	Ok(())
 }
 
 impl PamServiceModule for PamKeePassXC {
+	#[cfg(feature = "session")]
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
 		let data: SessionData = match unsafe { pamh.retrieve_data(MODULE_NAME) } {
 			Err(e) => return e,
@@ -146,13 +168,13 @@ impl PamServiceModule for PamKeePassXC {
 			};
 
 			// Double fork
-			match fork() {
+			match double_fork() {
 				Ok(Fork::Parent(pid)) => {
 					pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
 						.expect("Failed to send syslog");
-					let _ = waitpid(pid); // collect child, to ensure grandchild is taken care of by init
 				}
 				Ok(Fork::Child) => {
+					// grandchild
 					let _ = wait_for_dbus(&user, &user_config, &pass);
 					exit(0)
 				}
@@ -193,20 +215,28 @@ impl PamServiceModule for PamKeePassXC {
 		)
 		.is_err()
 		{
-			pamh.syslog(
-				LogLvl::WARNING,
-				"Unable to unlock keepass on auth, sending password to session",
-			)
-			.expect("Failed to send syslog");
+			#[cfg(feature = "session")]
+			{
+				pamh.syslog(
+					LogLvl::WARNING,
+					"Unable to unlock keepass on auth, sending password to session",
+				)
+				.expect("Failed to send syslog");
 
-			let data = SessionData(Some(pass.to_string_lossy().to_string()));
-			if let Err(e) = unsafe { pamh.send_data(MODULE_NAME, data) } {
-				return e;
+				let data = SessionData(Some(pass.to_string_lossy().to_string()));
+				if let Err(e) = unsafe { pamh.send_data(MODULE_NAME, data) } {
+					return e;
+				}
 			}
 			return PamError::AUTH_ERR;
 		}
 
 		PamError::SUCCESS
+	}
+
+	#[cfg(not(feature = "session"))]
+	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
+		return PamError::IGNORE;
 	}
 }
 
