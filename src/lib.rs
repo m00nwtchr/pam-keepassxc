@@ -36,7 +36,7 @@ impl PamData for SessionData {
 
 fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {
 	let mut conn = RpcConn::connect_to_path(
-		UnixAddr::new("/run/user/1000/bus")?,
+		UnixAddr::new(format!("/run/user/{}/bus", get_current_uid()).as_str())?,
 		rustbus::connection::Timeout::Infinite,
 	)?;
 
