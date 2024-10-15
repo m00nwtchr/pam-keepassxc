@@ -3,23 +3,28 @@ A PAM module for KeePassXC auto-unlocking.
 
 ## WARNING: This is a very early (but functional) prototype. There are no guarantees regarding security or compatibility with your setup.
 
-### REQUIREMENTS
+### Installation
 
-Currently, this only works for in-session authentication, IE with session lockers such as `swaylock`.
+Install: 
+  - `libpam_keepassxc.so` library to `/usr/lib/security/pam_keepassxc.so`.
+  - `systemd/keepassxc.service` as a user systemd service.
+  - `systemd/org.keepassxc.KeePassXC.MainWindow.service` as a dbus service file.
+  -  Create a systemd service alias (symlink) from `keepassxc.service` to `dbus-org.keepassxc.KeePassXC.MainWindow.service`
+  - `systemctl --user daemon-reload`
 
-Suggested configuration:
-- Setup autologin,
-- Use `swaylock` as a "login screen" on session start with e.g. `exec swaylock` in `sway`'s configuration.
-- Make sure KeePassXC is started on login as well, in any way you choose.
-
-### Configuration
-
-Install the `libpam_keepassxc.so` library to `/usr/lib/security/pam_keepassxc.so`.
+AUR package with a correct example installation Soon:TM:
 
 Adjust your `/etc/pam.d/swaylock` or equivalent to add the following line, as the very last `auth` entry in the file.
 ```
 auth optional pam_keepassxc.so
 ```
+
+For login managers such as `greetd`, do the above *and* also add the following line to your `/etc/pam.d/greetd`, in the same manner as the `auth` entry.
+```
+session optional pam_keepassxc.so
+```
+
+### Configuration
 
 Create a `$HOME/.config/security/pam_keepassxc.toml` file, with the following contents:
 ```toml

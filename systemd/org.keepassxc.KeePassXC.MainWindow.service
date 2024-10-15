@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.keepassxc.KeePassXC.MainWindow
+Exec=/usr/bin/keepassxc
+SystemdService=dbus-org.keepassxc.KeePassXC.MainWindow.service

@@ -1,9 +1,22 @@
-use std::{error::Error, fs};
+use std::{
+	error::Error,
+	fs,
+	process::exit,
+	thread::sleep,
+	time::{Duration, Instant},
+};
 
+use fork::{close_fd, fork, setsid, waitpid, Fork};
+use nix::sys::socket::UnixAddr;
 use pamsm::{pam_module, LogLvl, Pam, PamData, PamError, PamFlags, PamLibExt, PamServiceModule};
+use rustbus::{MessageBuilder, RpcConn};
 use serde::Deserialize;
-use users::{os::unix::UserExt, User};
-use zbus::{blocking::Connection, proxy};
+use users::{
+	get_current_gid, get_current_uid,
+	os::unix::UserExt,
+	switch::{set_both_gid, set_both_uid, set_effective_gid, set_effective_uid},
+	User,
+};
 
 struct PamKeePassXC;
 
@@ -12,17 +25,6 @@ struct SessionData(Option<String>);
 
 const MODULE_NAME: &str = "pam_keepassxc";
 
-#[proxy(
-	interface = "org.keepassxc.KeePassXC.MainWindow",
-	default_service = "org.keepassxc.KeePassXC.MainWindow",
-	default_path = "/keepassxc",
-	gen_async = false
-)]
-trait MainWindow {
-	#[zbus(name = "openDatabase")]
-	fn open_database(&self, database_path: &str, password: &str) -> zbus::Result<()>;
-}
-
 impl PamData for SessionData {
 	fn cleanup(&self, _pam: Pam, flags: PamFlags, _status: PamError) {
 		if !flags.contains(PamFlags::SILENT) {}
@@ -30,10 +32,22 @@ impl PamData for SessionData {
 }
 
 fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {
-	let connection = Connection::session()?;
-	let proxy = MainWindowProxy::new(&connection)?;
+	let mut conn = RpcConn::connect_to_path(
+		UnixAddr::new("/run/user/1000/bus")?,
+		rustbus::connection::Timeout::Infinite,
+	)?;
 
-	Ok(proxy.open_database(database, pass)?)
+	let mut call = MessageBuilder::new()
+		.call("openDatabase")
+		.with_interface("org.keepassxc.KeePassXC.MainWindow")
+		.on("/keepassxc")
+		.at("org.keepassxc.KeePassXC.MainWindow")
+		.build();
+	call.body.push_params(&[database, pass])?;
+
+	let _ = conn.send_message(&mut call)?.write_all();
+
+	Ok(())
 }
 
 #[derive(Deserialize)]
@@ -49,7 +63,7 @@ fn user_config(user: &User) -> Option<UserConfig> {
 		.join(MODULE_NAME)
 		.with_extension("toml");
 
-	toml::de::from_str(&fs::read_to_string(config_path).ok()?).ok()
+	basic_toml::from_str(&fs::read_to_string(config_path).ok()?).ok()
 }
 
 fn database_path(user: &User, config: &UserConfig) -> String {
@@ -64,6 +78,40 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 	result
 }
 
+const TIMEOUT: Duration = Duration::from_secs(30);
+fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) -> Result<(), i32> {
+	setsid()?;
+	close_fd()?;
+
+	if let Ok(Fork::Child) = fork() {
+		// grandchild
+		let _ = set_effective_uid(get_current_uid());
+		let _ = set_effective_gid(get_current_gid());
+
+		// Set gid first, then uid
+		let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
+		let _ = set_both_uid(user.uid(), user.uid());
+
+		let database_path = database_path(&user, &user_config);
+		let start = Instant::now();
+		loop {
+			match unlock_keepassxc(&database_path, pass) {
+				Ok(_) => {
+					break;
+				}
+				Err(err) => {
+					if start.elapsed() >= TIMEOUT {
+						break;
+					}
+					sleep(Duration::from_secs(1));
+				}
+			}
+		}
+	}
+
+	exit(0);
+}
+
 impl PamServiceModule for PamKeePassXC {
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
 		let data: SessionData = match unsafe { pamh.retrieve_data(MODULE_NAME) } {
@@ -73,6 +121,11 @@ impl PamServiceModule for PamKeePassXC {
 		let pass = data.0;
 
 		if let Some(pass) = pass {
+			{
+				let data = SessionData(None);
+				let _ = unsafe { pamh.send_data(MODULE_NAME, data) };
+			}
+
 			pamh.syslog(
 				LogLvl::WARNING,
 				"Trying to unlock keepassxc on session open...",
@@ -92,13 +145,18 @@ impl PamServiceModule for PamKeePassXC {
 				return PamError::IGNORE;
 			};
 
-			if unlock_keepassxc(&database_path(&user, &user_config), &pass).is_err() {
-				return PamError::AUTH_ERR;
-			}
-
-			let data = SessionData(None);
-			if let Err(e) = unsafe { pamh.send_data(MODULE_NAME, data) } {
-				return e;
+			// Double fork
+			match fork() {
+				Ok(Fork::Parent(pid)) => {
+					pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
+						.expect("Failed to send syslog");
+					let _ = waitpid(pid); // collect child, to ensure grandchild is taken care of by init
+				}
+				Ok(Fork::Child) => {
+					let _ = wait_for_dbus(&user, &user_config, &pass);
+					exit(0)
+				}
+				Err(_) => {}
 			}
 		}
 

@@ -14,8 +14,10 @@ opt-level = "z"
 panic = "abort"
 
 [dependencies]
+basic-toml = "0.1.9"
+fork = "0.2.0"
+nix = { version = "0.26.4", features = ["socket"] }
 pamsm = { version = "0.5", features = ["libpam"] }
+rustbus = "0.19.3"
 serde = { version = "1.0.210", features = ["derive"] }
-toml = "0.8.19"
 users = { version = "0.11.0", default-features = false }
-zbus = { version = "4.4", default-features = false, features = ["async-io", "blocking"] }

@@ -1,0 +1,13 @@
+[Unit]
+Description=KeePassXC
+After=xdg-desktop-autostart.target
+
+[Service]
+Type=dbus
+ExitType=cgroup
+ExecStartPre=/bin/sleep 1
+ExecStart=:/usr/bin/keepassxc
+Restart=no
+TimeoutStopSec=5s
+Slice=app.slice
+BusName=org.keepassxc.KeePassXC.MainWindow
