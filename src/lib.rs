@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 use std::{
 	error::Error,
 	fs,
@@ -85,7 +86,7 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 **/
 #[cfg(feature = "session")]
 fn double_fork() -> Result<Fork, i32> {
-	return match fork() {
+	match fork() {
 		Ok(Fork::Parent(pid)) => {
 			let _ = waitpid(pid);
 
@@ -96,17 +97,17 @@ fn double_fork() -> Result<Fork, i32> {
 			let _ = close_fd();
 
 			match fork() {
-				Ok(Fork::Child) => return Ok(Fork::Child),
+				Ok(Fork::Child) => Ok(Fork::Child),
 				_ => exit(0),
 			}
 		}
 		a => a,
-	};
+	}
 }
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "session")]
-fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) -> Result<(), i32> {
+fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) {
 	let _ = set_effective_uid(get_current_uid());
 	let _ = set_effective_gid(get_current_gid());
 
@@ -114,23 +115,18 @@ fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) -> Result<()
 	let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
 	let _ = set_both_uid(user.uid(), user.uid());
 
-	let database_path = database_path(&user, &user_config);
+	let database_path = database_path(user, user_config);
 	let start = Instant::now();
 	loop {
-		match unlock_keepassxc(&database_path, pass) {
-			Ok(_) => {
-				break;
-			}
-			Err(_) => {
-				if start.elapsed() >= TIMEOUT {
-					break;
-				}
-				sleep(Duration::from_secs(1));
-			}
+		if let Ok(()) = unlock_keepassxc(&database_path, pass) {
+			break;
 		}
-	}
 
-	Ok(())
+		if start.elapsed() >= TIMEOUT {
+			break;
+		}
+		sleep(Duration::from_secs(1));
+	}
 }
 
 impl PamServiceModule for PamKeePassXC {
@@ -175,7 +171,7 @@ impl PamServiceModule for PamKeePassXC {
 				}
 				Ok(Fork::Child) => {
 					// grandchild
-					let _ = wait_for_dbus(&user, &user_config, &pass);
+					wait_for_dbus(&user, &user_config, &pass);
 					exit(0)
 				}
 				Err(_) => {}
