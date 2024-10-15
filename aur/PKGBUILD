@@ -1,0 +1,59 @@
+# Maintainer: Your Name <youremail@domain.com>
+pkgname=pam-keepassxc
+pkgver=1.0.0
+pkgrel=1
+epoch=
+pkgdesc="A PAM module for KeePassXC auto-unlocking."
+arch=('x86_64')
+url="https://github.com/m00nwtchr/pam-keepassxc"
+license=()
+groups=()
+depends=('pam')
+makedepends=('cargo-nightly')
+checkdepends=()
+optdepends=()
+provides=()
+conflicts=()
+replaces=()
+backup=()
+options=()
+install=
+changelog=
+source=("$pkgname"::'git+https://github.com/m00nwtchr/pam-keepassxc.git')
+noextract=()
+sha256sums=('SKIP')
+validpgpkeys=()
+
+__TARGET="$(rustc -vV | sed -n 's/host: //p')"
+
+prepare() {
+	cd "$pkgname"
+	cargo fetch --locked --target "$__TARGET"
+}
+
+build() {
+	cd "$pkgname"
+
+	export CARGO_TARGET_DIR=target
+	cargo build \
+		-Z build-std=std,panic_abort \
+		-Z build-std-features=optimize_for_size,panic_immediate_abort \
+		--release \
+		--frozen --all-features --target "$__TARGET"
+}
+
+check() {
+	cd "$pkgname"
+
+	cargo test --frozen --all-features
+}
+
+package() {
+	cd "$pkgname"
+
+	install -Dm0755 "target/$__TARGET/release/libpam_keepassxc.so" "$pkgdir/usr/lib/security/pam_keepassxc.so"	
+
+	install -Dm0644 -t "$pkgdir/usr/lib/systemd/user/" "systemd/keepassxc.service"
+	ln -s "keepassxc.service" "$pkgdir/usr/lib/systemd/user/dbus-org.keepassxc.KeePassXC.MainWindow.service"
+	install -Dm0644 -t "$pkgdir/usr/share/dbus-1/services/" "systemd/org.keepassxc.KeePassXC.MainWindow.service"
+}
