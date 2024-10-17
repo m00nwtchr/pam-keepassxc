@@ -215,7 +215,7 @@ fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 impl PamServiceModule for PamKeePassXC {
 	#[cfg(feature = "session")]
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-		init_syslog();
+		let _ = init_syslog();
 		let data = match pamh.retrieve_bytes(MODULE_NAME) {
 			Err(e) => return e,
 			Ok(data) => data,
@@ -263,7 +263,7 @@ impl PamServiceModule for PamKeePassXC {
 	}
 
 	fn authenticate(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-		init_syslog();
+		let _ = init_syslog();
 		let user = match pamh.get_user(None) {
 			Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
 				Some(u) => u,
