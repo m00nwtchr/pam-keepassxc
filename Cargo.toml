@@ -18,6 +18,7 @@ default = ["session"]
 session = ["dep:fork"]
 
 [dependencies]
+anyhow = "1.0.89"
 basic-toml = "0.1.9"
 fork = { version = "0.2.0", optional = true }
 nix = { version = "0.26.4", features = ["socket"] }

@@ -1,17 +1,17 @@
 #![warn(clippy::pedantic)]
 use std::{
-	error::Error,
 	fs,
 	process::exit,
 	thread::sleep,
 	time::{Duration, Instant},
 };
 
+use anyhow::{anyhow, Result};
 #[cfg(feature = "session")]
 use fork::{close_fd, fork, setsid, waitpid, Fork};
 use nix::sys::socket::UnixAddr;
 use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
-use rustbus::{MessageBuilder, RpcConn};
+use rustbus::{connection::Timeout, MessageBuilder, RpcConn};
 use serde::Deserialize;
 use users::{
 	get_current_gid, get_current_uid,
@@ -23,27 +23,6 @@ use users::{
 const MODULE_NAME: &str = "pam_keepassxc";
 
 struct PamKeePassXC;
-
-fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {
-	// Create a connection to the D-Bus message bus
-	let mut conn = RpcConn::connect_to_path(
-		UnixAddr::new(format!("/run/user/{}/bus", get_current_uid()).as_str())?,
-		rustbus::connection::Timeout::Infinite,
-	)?;
-
-	// Build a D-Bus message to request the unlocking of the KeePassXC database.
-	let mut call = MessageBuilder::new()
-		.call("openDatabase")
-		.with_interface("org.keepassxc.KeePassXC.MainWindow")
-		.on("/keepassxc")
-		.at("org.keepassxc.KeePassXC.MainWindow")
-		.build();
-	call.body.push_params(&[database, pass])?;
-
-	let _ = conn.send_message(&mut call)?.write_all();
-
-	Ok(())
-}
 
 #[derive(Deserialize)]
 struct UserConfig {
@@ -98,30 +77,118 @@ fn double_fork() -> Result<Fork, i32> {
 	}
 }
 
+const KEEPASSXC_OBJECT: &str = "org.keepassxc.KeePassXC.MainWindow";
+
 const TIMEOUT: Duration = Duration::from_secs(30);
+const INTERVAL: Duration = Duration::from_secs(1);
+
+fn unlock(conn: &mut RpcConn, database: &str, pass: &str) -> Result<()> {
+	// Build a D-Bus message to request the unlocking of the KeePassXC database.
+	let mut call = MessageBuilder::new()
+		.call("openDatabase")
+		.with_interface("org.keepassxc.KeePassXC.MainWindow")
+		.on("/keepassxc")
+		.at(KEEPASSXC_OBJECT)
+		.build();
+	call.body.push_params(&[database, pass])?;
+
+	let _ = conn.send_message(&mut call)?.write_all();
+
+	Ok(())
+}
+
+pub fn verify(pid: u32) -> Result<()> {
+	let bin = fs::read_link(format!("/prox/{pid}/exe"))?;
+
+	if bin.as_os_str() == "/usr/bin/keepassxc" {
+		Ok(())
+	} else {
+		Err(anyhow!("Wrong service binary."))
+	}
+}
+
+pub fn get_pid(conn: &mut RpcConn) -> Result<u32> {
+	// Get PID of KeePassXC service.
+	let mut call = MessageBuilder::new()
+		.call("GetConnectionUnixProcessID")
+		.with_interface("org.freedesktop.DBus")
+		.on("/")
+		.at("org.freedesktop.DBus")
+		.build();
+	call.body.push_params(&[KEEPASSXC_OBJECT])?;
+
+	let id = conn.send_message(&mut call)?.write_all().map_err(|e| e.1)?;
+	let message = conn.wait_response(id, Timeout::Duration(TIMEOUT))?;
+
+	let pid: u32 = message.body.parser().get()?;
+	Ok(pid)
+}
+
+pub fn activate(conn: &mut RpcConn) -> Result<()> {
+	let mut call = MessageBuilder::new()
+		.call("Ping")
+		.with_interface("org.freedesktop.DBus.Peer")
+		.on("/")
+		.at(KEEPASSXC_OBJECT)
+		.build();
+
+	let id = conn
+		.send_message(&mut call)?
+		.write_all()
+		.map_err(|err| err.1)?;
+	let _ = conn.wait_response(id, Timeout::Duration(TIMEOUT))?;
+
+	Ok(())
+}
+
+pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
+	let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid()).as_str())?;
+
+	let start = Instant::now();
+	let conn = loop {
+		match RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite) {
+			Ok(conn) => break conn,
+			Err(_) => {
+				if start.elapsed() >= TIMEOUT {
+					return Err(anyhow!("Timed out."));
+				}
+				sleep(INTERVAL)
+			}
+		}
+	};
+
+	Ok(conn)
+}
+
+fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
+	let mut conn = if flag {
+		let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid()).as_str())?;
+
+		RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite)?
+	} else {
+		wait_for_dbus(user)?
+	};
+
+	activate(&mut conn)?;
+	let pid = get_pid(&mut conn)?;
+
+	verify(pid)?;
+
+	let database_path = database_path(user, user_config);
+	unlock(&mut conn, &database_path, pass)?;
+	Ok(())
+}
 
 #[cfg(feature = "session")]
-fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) {
+fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 	let _ = set_effective_uid(get_current_uid());
 	let _ = set_effective_gid(get_current_gid());
 
 	let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
 	let _ = set_both_uid(user.uid(), user.uid());
 
-	let database_path = database_path(user, user_config);
-	let start = Instant::now();
-
-	// Continuously attempt to unlock the KeePassXC database, with a timeout limit.
-	loop {
-		if let Ok(()) = unlock_keepassxc(&database_path, pass) {
-			break; // Successfully unlocked the database.
-		}
-
-		if start.elapsed() >= TIMEOUT {
-			break; // Exit the loop if the operation takes longer than the timeout period.
-		}
-		sleep(Duration::from_secs(1));
-	}
+	try_unlock(false, user, user_config, pass)?;
+	Ok(())
 }
 
 impl PamServiceModule for PamKeePassXC {
@@ -160,7 +227,7 @@ impl PamServiceModule for PamKeePassXC {
 			}
 			Ok(Fork::Child) => {
 				// Grandchild process that waits for the D-Bus service to be ready.
-				wait_for_dbus(&user, &user_config, &pass);
+				let _ = grandchild(&user, &user_config, &pass);
 				exit(0)
 			}
 			Err(_) => {}
@@ -192,7 +259,7 @@ impl PamServiceModule for PamKeePassXC {
 			return PamError::IGNORE;
 		};
 
-		if unlock_keepassxc(&database_path(&user, &user_config), pass).is_err() {
+		if try_unlock(true, &user, &user_config, pass).is_err() {
 			#[cfg(feature = "session")]
 			{
 				pamh.syslog(
