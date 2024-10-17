@@ -9,6 +9,7 @@ use std::{
 use anyhow::{anyhow, Result};
 #[cfg(feature = "session")]
 use fork::{close_fd, fork, setsid, waitpid, Fork};
+use log::{error, info, warn};
 use nix::sys::socket::UnixAddr;
 use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
 use rustbus::{connection::Timeout, MessageBuilder, RpcConn};
@@ -77,6 +78,24 @@ fn double_fork() -> Result<Fork, i32> {
 	}
 }
 
+fn init_syslog() -> Result<()> {
+	use log::LevelFilter;
+	use syslog::{BasicLogger, Facility, Formatter3164};
+
+	let formatter = Formatter3164 {
+		facility: Facility::LOG_USER,
+		hostname: None,
+		process: MODULE_NAME.into(),
+		pid: std::process::id(),
+	};
+
+	let logger = syslog::unix(formatter)?;
+	log::set_boxed_logger(Box::new(BasicLogger::new(logger)))
+		.map(|()| log::set_max_level(LevelFilter::Info))?;
+
+	Ok(())
+}
+
 const KEEPASSXC_OBJECT: &str = "org.keepassxc.KeePassXC.MainWindow";
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -97,8 +116,9 @@ fn unlock(conn: &mut RpcConn, database: &str, pass: &str) -> Result<()> {
 	Ok(())
 }
 
+// Doesn't work, for some reason /proc/pid/exe is only readable by root
 pub fn verify(pid: u32) -> Result<()> {
-	let bin = fs::read_link(format!("/prox/{pid}/exe"))?;
+	let bin = fs::read_link(format!("/proc/{pid}/exe"))?;
 
 	if bin.as_os_str() == "/usr/bin/keepassxc" {
 		Ok(())
@@ -170,9 +190,10 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 	};
 
 	activate(&mut conn)?;
-	let pid = get_pid(&mut conn)?;
 
-	verify(pid)?;
+	// TODO: Make it work
+	// let pid = get_pid(&mut conn)?;
+	// verify(pid)?;
 
 	let database_path = database_path(user, user_config);
 	unlock(&mut conn, &database_path, pass)?;
@@ -194,6 +215,7 @@ fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 impl PamServiceModule for PamKeePassXC {
 	#[cfg(feature = "session")]
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
+		init_syslog();
 		let data = match pamh.retrieve_bytes(MODULE_NAME) {
 			Err(e) => return e,
 			Ok(data) => data,
@@ -241,6 +263,7 @@ impl PamServiceModule for PamKeePassXC {
 	}
 
 	fn authenticate(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
+		init_syslog();
 		let user = match pamh.get_user(None) {
 			Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
 				Some(u) => u,
@@ -259,14 +282,11 @@ impl PamServiceModule for PamKeePassXC {
 			return PamError::IGNORE;
 		};
 
-		if try_unlock(true, &user, &user_config, pass).is_err() {
+		if let Err(err) = try_unlock(true, &user, &user_config, pass) {
+			error!("{}", err);
 			#[cfg(feature = "session")]
 			{
-				pamh.syslog(
-					LogLvl::WARNING,
-					"Unable to unlock keepass on auth, sending password to session",
-				)
-				.expect("Failed to send syslog");
+				warn!("Unable to unlock keepass on auth, sending password to session");
 
 				if let Err(e) = pamh.send_bytes(MODULE_NAME, pass.as_bytes().to_vec(), None) {
 					return e;
