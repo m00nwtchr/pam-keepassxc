@@ -10,7 +10,7 @@ use std::{
 #[cfg(feature = "session")]
 use fork::{close_fd, fork, setsid, waitpid, Fork};
 use nix::sys::socket::UnixAddr;
-use pamsm::{pam_module, LogLvl, Pam, PamData, PamError, PamFlags, PamLibExt, PamServiceModule};
+use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
 use rustbus::{MessageBuilder, RpcConn};
 use serde::Deserialize;
 use users::{
@@ -20,21 +20,11 @@ use users::{
 	User,
 };
 
-struct PamKeePassXC;
-
-#[derive(Debug, Clone)]
-#[cfg(feature = "session")]
-struct SessionData(Option<String>);
-
 const MODULE_NAME: &str = "pam_keepassxc";
 
-impl PamData for SessionData {
-	fn cleanup(&self, _pam: Pam, flags: PamFlags, _status: PamError) {
-		if !flags.contains(PamFlags::SILENT) {}
-	}
-}
+struct PamKeePassXC;
 
-fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {i
+fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {
 	// Create a connection to the D-Bus message bus
 	let mut conn = RpcConn::connect_to_path(
 		UnixAddr::new(format!("/run/user/{}/bus", get_current_uid()).as_str())?,
@@ -137,49 +127,43 @@ fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) {
 impl PamServiceModule for PamKeePassXC {
 	#[cfg(feature = "session")]
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-		let data: SessionData = match unsafe { pamh.retrieve_data(MODULE_NAME) } {
+		let data = match pamh.retrieve_bytes(MODULE_NAME) {
 			Err(e) => return e,
 			Ok(data) => data,
 		};
-		let pass = data.0;
+		let pass = String::from_utf8_lossy(&data);
+		let _ = pamh.send_bytes(MODULE_NAME, Vec::new(), None); // Clear saved password
 
-		if let Some(pass) = pass {
-			{
-				let data = SessionData(None);
-				let _ = unsafe { pamh.send_data(MODULE_NAME, data) };
+		pamh.syslog(
+			LogLvl::WARNING,
+			"Trying to unlock keepassxc on session open...",
+		)
+		.expect("Failed to send syslog");
+
+		let user = match pamh.get_user(None) {
+			Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
+				Some(u) => u,
+				None => return PamError::USER_UNKNOWN,
+			},
+			Ok(None) => return PamError::USER_UNKNOWN,
+			Err(e) => return e,
+		};
+
+		let Some(user_config) = user_config(&user) else {
+			return PamError::IGNORE;
+		};
+
+		match double_fork() {
+			Ok(Fork::Parent(pid)) => {
+				pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
+					.expect("Failed to send syslog");
 			}
-
-			pamh.syslog(
-				LogLvl::WARNING,
-				"Trying to unlock keepassxc on session open...",
-			)
-			.expect("Failed to send syslog");
-
-			let user = match pamh.get_user(None) {
-				Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
-					Some(u) => u,
-					None => return PamError::USER_UNKNOWN,
-				},
-				Ok(None) => return PamError::USER_UNKNOWN,
-				Err(e) => return e,
-			};
-
-			let Some(user_config) = user_config(&user) else {
-				return PamError::IGNORE;
-			};
-
-			match double_fork() {
-				Ok(Fork::Parent(pid)) => {
-					pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
-						.expect("Failed to send syslog");
-				}
-				Ok(Fork::Child) => {
-					// Grandchild process that waits for the D-Bus service to be ready.
-					wait_for_dbus(&user, &user_config, &pass);
-					exit(0)
-				}
-				Err(_) => {}
+			Ok(Fork::Child) => {
+				// Grandchild process that waits for the D-Bus service to be ready.
+				wait_for_dbus(&user, &user_config, &pass);
+				exit(0)
 			}
+			Err(_) => {}
 		}
 
 		PamError::SUCCESS
@@ -198,9 +182,8 @@ impl PamServiceModule for PamKeePassXC {
 			Ok(None) => return PamError::USER_UNKNOWN,
 			Err(e) => return e,
 		};
-
 		let pass = match pamh.get_authtok(None) {
-			Ok(Some(p)) => p,
+			Ok(Some(p)) => p.to_str().expect(""),
 			Ok(None) => return PamError::AUTH_ERR,
 			Err(e) => return e,
 		};
@@ -209,12 +192,7 @@ impl PamServiceModule for PamKeePassXC {
 			return PamError::IGNORE;
 		};
 
-		if unlock_keepassxc(
-			&database_path(&user, &user_config),
-			pass.to_str().expect(""),
-		)
-		.is_err()
-		{
+		if unlock_keepassxc(&database_path(&user, &user_config), pass).is_err() {
 			#[cfg(feature = "session")]
 			{
 				pamh.syslog(
@@ -223,8 +201,7 @@ impl PamServiceModule for PamKeePassXC {
 				)
 				.expect("Failed to send syslog");
 
-				let data = SessionData(Some(pass.to_string_lossy().to_string()));
-				if let Err(e) = unsafe { pamh.send_data(MODULE_NAME, data) } {
+				if let Err(e) = pamh.send_bytes(MODULE_NAME, pass.as_bytes().to_vec(), None) {
 					return e;
 				}
 			}
