@@ -34,12 +34,14 @@ impl PamData for SessionData {
 	}
 }
 
-fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {
+fn unlock_keepassxc(database: &str, pass: &str) -> Result<(), Box<dyn Error>> {i
+	// Create a connection to the D-Bus message bus
 	let mut conn = RpcConn::connect_to_path(
 		UnixAddr::new(format!("/run/user/{}/bus", get_current_uid()).as_str())?,
 		rustbus::connection::Timeout::Infinite,
 	)?;
 
+	// Build a D-Bus message to request the unlocking of the KeePassXC database.
 	let mut call = MessageBuilder::new()
 		.call("openDatabase")
 		.with_interface("org.keepassxc.KeePassXC.MainWindow")
@@ -82,13 +84,13 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 }
 
 /**
- * Will only return for the parent & grandchild
+ * Perform a double fork to detach the process and avoid zombie processes.
 **/
 #[cfg(feature = "session")]
 fn double_fork() -> Result<Fork, i32> {
 	match fork() {
 		Ok(Fork::Parent(pid)) => {
-			let _ = waitpid(pid);
+			let _ = waitpid(pid); // Wait for the first child process to exit.
 
 			Ok(Fork::Parent(pid))
 		}
@@ -96,6 +98,7 @@ fn double_fork() -> Result<Fork, i32> {
 			let _ = setsid();
 			let _ = close_fd();
 
+			// Fork again to create the grandchild process.
 			match fork() {
 				Ok(Fork::Child) => Ok(Fork::Child),
 				_ => exit(0),
@@ -106,24 +109,26 @@ fn double_fork() -> Result<Fork, i32> {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "session")]
 fn wait_for_dbus(user: &User, user_config: &UserConfig, pass: &str) {
 	let _ = set_effective_uid(get_current_uid());
 	let _ = set_effective_gid(get_current_gid());
 
-	// Set gid first, then uid
 	let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
 	let _ = set_both_uid(user.uid(), user.uid());
 
 	let database_path = database_path(user, user_config);
 	let start = Instant::now();
+
+	// Continuously attempt to unlock the KeePassXC database, with a timeout limit.
 	loop {
 		if let Ok(()) = unlock_keepassxc(&database_path, pass) {
-			break;
+			break; // Successfully unlocked the database.
 		}
 
 		if start.elapsed() >= TIMEOUT {
-			break;
+			break; // Exit the loop if the operation takes longer than the timeout period.
 		}
 		sleep(Duration::from_secs(1));
 	}
@@ -163,14 +168,13 @@ impl PamServiceModule for PamKeePassXC {
 				return PamError::IGNORE;
 			};
 
-			// Double fork
 			match double_fork() {
 				Ok(Fork::Parent(pid)) => {
 					pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
 						.expect("Failed to send syslog");
 				}
 				Ok(Fork::Child) => {
-					// grandchild
+					// Grandchild process that waits for the D-Bus service to be ready.
 					wait_for_dbus(&user, &user_config, &pass);
 					exit(0)
 				}
