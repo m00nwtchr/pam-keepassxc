@@ -16,7 +16,7 @@ This is a prototype. There are no guarantees regarding security or compatibility
      systemctl --user daemon-reload
      ```
 
-   See `aur/PKGBUILD` for an example.
+   See the [PKGBUILD](aur/PKGBUILD) for an example.
 
 2. Adjust your PAM configuration:
    - Edit your `/etc/pam.d/swaylock` (or equivalent) file and add the following line as the last `auth` entry:
