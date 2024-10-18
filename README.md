@@ -36,6 +36,8 @@ Create a configuration file at `$HOME/.config/security/pam_keepassxc.toml` with 
 database_path = "$HOME/<your database path>"
 ```
 
+Important: KeePassXC *must be* started as a systemd service. Make sure that you remove any other autostart configuration for KeePassXC. You don't need to enable the `keepassxc.service`, it will be started via D-Bus activation. If you wish to disable D-Bus activation for the `org.keepassxc.KeePassXC.MainWindow` D-Bus name, you can mask `dbus-org.keepassxc.KeePassXC.MainWindow.service`.
+
 ## Contributing
 
 This is my first experience working with PAM, so I would appreciate any feedback on potential security issues and other improvements.
