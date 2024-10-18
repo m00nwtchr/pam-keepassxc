@@ -34,3 +34,9 @@ database_path = "$HOME/<your database path>"
 ### Contributing
 
 This is literally the first time I'm doing anything with PAM, so I'd appreciate it if someone would point out all the terrible mistakes I'm probably making :D
+
+### License
+
+The source code in this repository is licensed under the [Mozilla Public License (MPL)](LICENSE). However, due to the inclusion of the GPLv3.0-licensed `pamsm` crate, any resulting compiled binaries are licensed under the GPLv3.0.
+
+If you distribute the compiled binaries, you must comply with the terms of the GPLv3.0.
