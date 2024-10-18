@@ -1,5 +1,6 @@
 #![warn(clippy::pedantic)]
 use std::{
+	collections::HashMap,
 	fs,
 	process::exit,
 	thread::sleep,
@@ -12,7 +13,14 @@ use fork::{close_fd, fork, setsid, waitpid, Fork};
 use log::{error, info, warn};
 use nix::sys::socket::UnixAddr;
 use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
-use rustbus::{connection::Timeout, MessageBuilder, RpcConn};
+use rustbus::{
+	connection::Timeout,
+	message_builder::MarshalledMessageBody,
+	params::{Base, DictMap, Param},
+	signature,
+	wire::{unmarshal::traits::Variant, ObjectPath},
+	MessageBuilder, RpcConn, Signature, Unmarshal,
+};
 use serde::Deserialize;
 use users::{
 	get_current_gid, get_current_uid,
@@ -109,21 +117,66 @@ fn unlock(conn: &mut RpcConn, database: &str, pass: &str) -> Result<()> {
 		.on("/keepassxc")
 		.at(KEEPASSXC_OBJECT)
 		.build();
-	call.body.push_params(&[database, pass])?;
+	call.body.push_param2(database, pass)?;
 
 	let _ = conn.send_message(&mut call)?.write_all();
 
 	Ok(())
 }
 
-// Doesn't work, for some reason /proc/pid/exe is only readable by root
-pub fn verify(pid: u32) -> Result<()> {
-	let bin = fs::read_link(format!("/proc/{pid}/exe"))?;
+#[derive(Unmarshal, Signature)]
+struct SystemdExec {
+	path: String,       // s
+	_args: Vec<String>, // as
+	_flag: bool,        // b
+	_a: u64,            // t
+	_b: u64,            // t
+	_c: u64,            // t
+	_d: u64,            // t
+	pid: u32,           // u
+	_timestamp: i32,    // i
+	_timestamp2: i32,   // i
+}
 
-	if bin.as_os_str() == "/usr/bin/keepassxc" {
+pub fn verify(conn: &mut RpcConn, pid: u32) -> Result<()> {
+	let mut call = MessageBuilder::new()
+		.call("GetUnitByPID")
+		.with_interface("org.freedesktop.systemd1.Manager")
+		.on("/org/freedesktop/systemd1")
+		.at("org.freedesktop.systemd1")
+		.build();
+	call.body.push_param(pid)?;
+
+	let id = conn.send_message(&mut call)?.write_all().map_err(|e| e.1)?;
+	let reply = conn.wait_response(id, Timeout::Duration(TIMEOUT))?;
+	if let Some(err) = reply.dynheader.error_name {
+		return Err(anyhow!(err));
+	}
+
+	let service_object: ObjectPath<&str> = reply.body.parser().get()?;
+
+	let mut call = MessageBuilder::new()
+		.call("Get")
+		.with_interface("org.freedesktop.DBus.Properties")
+		.on(service_object.as_ref())
+		.at("org.freedesktop.systemd1")
+		.build();
+	call.body
+		.push_param2("org.freedesktop.systemd1.Service", "ExecStart")?;
+
+	let id = conn
+		.send_message(&mut call)?
+		.write_all()
+		.map_err(|err| err.1)?;
+	let reply = conn.wait_response(id, Timeout::Duration(TIMEOUT))?;
+
+	let exec: Vec<SystemdExec> = reply.body.parser().get::<Variant>()?.get()?;
+	let exec = exec.first().ok_or(anyhow!(""))?;
+
+	if exec.path == "/usr/bin/keepassxc" && exec.pid == pid {
 		Ok(())
 	} else {
-		Err(anyhow!("Wrong service binary."))
+		Err(anyhow!("Invalid"))
 	}
 }
 
@@ -135,7 +188,7 @@ pub fn get_pid(conn: &mut RpcConn) -> Result<u32> {
 		.on("/")
 		.at("org.freedesktop.DBus")
 		.build();
-	call.body.push_params(&[KEEPASSXC_OBJECT])?;
+	call.body.push_param(KEEPASSXC_OBJECT)?;
 
 	let id = conn.send_message(&mut call)?.write_all().map_err(|e| e.1)?;
 	let message = conn.wait_response(id, Timeout::Duration(TIMEOUT))?;
@@ -191,9 +244,8 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 
 	activate(&mut conn)?;
 
-	// TODO: Make it work
-	// let pid = get_pid(&mut conn)?;
-	// verify(pid)?;
+	let pid = get_pid(&mut conn)?;
+	verify(&mut conn, pid)?;
 
 	let database_path = database_path(user, user_config);
 	unlock(&mut conn, &database_path, pass)?;
