@@ -2,7 +2,7 @@
 name = "pam-keepassxc"
 version = "0.1.0"
 license = "MPL-2.0 AND GPL-3.0"
-private = true
+publish = false
 edition = "2021"
 
 [lib]
