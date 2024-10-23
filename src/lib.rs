@@ -1,7 +1,6 @@
 #![warn(clippy::pedantic)]
 use std::{
 	fs,
-	process::exit,
 	thread::sleep,
 	time::{Duration, Instant},
 };
@@ -9,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use log::{error, warn};
 use nix::{sys::socket::UnixAddr, unistd::User};
-use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
+use pamsm::{pam_module, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
 use rustbus::{
 	connection::Timeout,
 	wire::{unmarshal::traits::Variant, ObjectPath},
@@ -58,29 +57,26 @@ fn double_fork() -> Result<nix::unistd::ForkResult> {
 		sys::wait::waitpid,
 		unistd::{close, fork, setsid, ForkResult},
 	};
+	match unsafe { fork() } {
+		Ok(ForkResult::Parent { child, .. }) => {
+			let _ = waitpid(child, None); // Wait for the first child process to exit.
 
-	unsafe {
-		match fork() {
-			Ok(ForkResult::Parent { child, .. }) => {
-				let _ = waitpid(child, None); // Wait for the first child process to exit.
-
-				Ok(ForkResult::Parent { child })
-			}
-			Ok(ForkResult::Child) => {
-				let _ = setsid();
-
-				let _ = close(0);
-				let _ = close(1);
-				let _ = close(2);
-
-				// Fork again to create the grandchild process.
-				match fork() {
-					Ok(ForkResult::Child) => Ok(ForkResult::Child),
-					_ => exit(0),
-				}
-			}
-			Err(err) => Err(anyhow!("{}", err)),
+			Ok(ForkResult::Parent { child })
 		}
+		Ok(ForkResult::Child) => {
+			let _ = setsid();
+
+			let _ = close(0);
+			let _ = close(1);
+			let _ = close(2);
+
+			// Fork again to create the grandchild process.
+			match unsafe { fork() } {
+				Ok(ForkResult::Child) => Ok(ForkResult::Child),
+				_ => std::process::exit(0),
+			}
+		}
+		Err(err) => Err(anyhow!("{}", err)),
 	}
 }
 
@@ -255,6 +251,8 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 	use nix::unistd::{getgid, getuid, setgid, setresgid, setresuid, setuid};
 
+	let _ = init_syslog(); // Reinitialize syslog for new PID
+
 	let _ = setuid(getuid());
 	let _ = setgid(getgid());
 
@@ -278,12 +276,7 @@ impl PamServiceModule for PamKeePassXC {
 		let pass = String::from_utf8_lossy(&data);
 		let _ = pamh.send_bytes(MODULE_NAME, Vec::new(), None); // Clear saved password
 
-		pamh.syslog(
-			LogLvl::WARNING,
-			"Trying to unlock keepassxc on session open...",
-		)
-		.expect("Failed to send syslog");
-
+		warn!("Trying to unlock keepassxc on session open...",);
 		let user = match pamh.get_user(None) {
 			Ok(Some(u)) => match User::from_name(u.to_str().expect("")) {
 				Ok(Some(u)) => u,
@@ -299,13 +292,12 @@ impl PamServiceModule for PamKeePassXC {
 
 		match double_fork() {
 			Ok(ForkResult::Parent { child, .. }) => {
-				pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {child}"))
-					.expect("Failed to send syslog");
+				warn!("Forked with PID: {child}")
 			}
 			Ok(ForkResult::Child) => {
 				// Grandchild process that waits for the D-Bus service to be ready.
 				let _ = grandchild(&user, &user_config, &pass);
-				exit(0)
+				std::process::exit(0)
 			}
 			Err(_) => {}
 		}
@@ -354,7 +346,7 @@ impl PamServiceModule for PamKeePassXC {
 	}
 
 	#[cfg(not(feature = "session"))]
-	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
+	fn open_session(_pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
 		return PamError::IGNORE;
 	}
 }
