@@ -8,12 +8,13 @@ use std::{
 use anyhow::{anyhow, Result};
 use log::{error, warn};
 use nix::{sys::socket::UnixAddr, unistd::User};
-use pamsm::{pam_module, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
+use pamsm::{pam_module, Pam, PamData, PamError, PamFlags, PamLibExt, PamServiceModule};
 use rustbus::{
 	connection::Timeout,
 	wire::{unmarshal::traits::Variant, ObjectPath},
 	MessageBuilder, RpcConn, Signature, Unmarshal,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 const MODULE_NAME: &str = "pam_keepassxc";
@@ -103,7 +104,7 @@ const KEEPASSXC_OBJECT: &str = "org.keepassxc.KeePassXC.MainWindow";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const INTERVAL: Duration = Duration::from_secs(1);
 
-fn unlock(conn: &mut RpcConn, database: &str, pass: &str) -> Result<()> {
+fn unlock(conn: &mut RpcConn, database: &str, pass: &SecretString) -> Result<()> {
 	// Build a D-Bus message to request the unlocking of the KeePassXC database.
 	let mut call = MessageBuilder::new()
 		.call("openDatabase")
@@ -111,7 +112,7 @@ fn unlock(conn: &mut RpcConn, database: &str, pass: &str) -> Result<()> {
 		.on("/keepassxc")
 		.at(KEEPASSXC_OBJECT)
 		.build();
-	call.body.push_param2(database, pass)?;
+	call.body.push_param2(database, pass.expose_secret())?;
 
 	let _ = conn.send_message(&mut call)?.write_all();
 
@@ -232,7 +233,12 @@ pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
 	Ok(conn)
 }
 
-fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
+fn try_unlock(
+	flag: bool,
+	user: &User,
+	user_config: &UserConfig,
+	pass: &SecretString,
+) -> Result<()> {
 	let mut conn = if flag {
 		RpcConn::connect_to_path(user_session_bus(&user)?, Timeout::Duration(TIMEOUT))?
 	} else {
@@ -250,7 +256,7 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 }
 
 #[cfg(feature = "session")]
-fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
+fn grandchild(user: &User, user_config: &UserConfig, pass: SecretString) -> Result<()> {
 	use nix::unistd::{getgid, getuid, setgid, setresgid, setresuid, setuid};
 
 	let _ = init_syslog(); // Reinitialize syslog for new PID
@@ -261,9 +267,16 @@ fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 	let _ = setresgid(user.gid, user.gid, user.gid);
 	let _ = setresuid(user.uid, user.uid, user.uid);
 
-	try_unlock(false, user, user_config, pass)?;
+	try_unlock(false, user, user_config, &pass)?;
 	Ok(())
 }
+
+#[derive(Clone)]
+struct SessionData {
+	pass: Option<SecretString>, // Secret wrapper ensures data is zeroed on drop.
+}
+
+impl PamData for SessionData {}
 
 impl PamServiceModule for PamKeePassXC {
 	#[cfg(feature = "session")]
@@ -271,12 +284,15 @@ impl PamServiceModule for PamKeePassXC {
 		use nix::unistd::ForkResult;
 
 		let _ = init_syslog();
-		let data = match pamh.retrieve_bytes(MODULE_NAME) {
+		let data: SessionData = match unsafe { pamh.retrieve_data(MODULE_NAME) } {
 			Err(e) => return e,
 			Ok(data) => data,
 		};
-		let pass = String::from_utf8_lossy(&data);
-		let _ = pamh.send_bytes(MODULE_NAME, Vec::new(), None); // Clear saved password
+		let _ = unsafe { pamh.send_data(MODULE_NAME, SessionData { pass: None }) }; // Clear saved data
+
+		let Some(pass) = data.pass else {
+			return PamError::SESSION_ERR;
+		};
 
 		warn!("Trying to unlock keepassxc on session open...",);
 		let user = match pamh.get_user(None) {
@@ -298,7 +314,7 @@ impl PamServiceModule for PamKeePassXC {
 			}
 			Ok(ForkResult::Child) => {
 				// Grandchild process that waits for the D-Bus service to be ready.
-				let _ = grandchild(&user, &user_config, &pass);
+				let _ = grandchild(&user, &user_config, pass);
 				std::process::exit(0)
 			}
 			Err(_) => {}
@@ -321,8 +337,9 @@ impl PamServiceModule for PamKeePassXC {
 			Ok(None) => return PamError::USER_UNKNOWN,
 			Err(e) => return e,
 		};
+
 		let pass = match pamh.get_authtok(None) {
-			Ok(Some(p)) => p.to_str().expect(""),
+			Ok(Some(p)) => SecretString::from(p.to_str().expect("")),
 			Ok(None) => return PamError::AUTH_ERR,
 			Err(e) => return e,
 		};
@@ -331,13 +348,15 @@ impl PamServiceModule for PamKeePassXC {
 			return PamError::IGNORE;
 		};
 
-		if let Err(err) = try_unlock(true, &user, &user_config, pass) {
+		if let Err(err) = try_unlock(true, &user, &user_config, &pass) {
 			error!("{}", err);
 			#[cfg(feature = "session")]
 			{
 				warn!("Unable to unlock keepass on auth, sending password to session");
 
-				if let Err(e) = pamh.send_bytes(MODULE_NAME, pass.as_bytes().to_vec(), None) {
+				if let Err(e) =
+					unsafe { pamh.send_data(MODULE_NAME, SessionData { pass: Some(pass) }) }
+				{
 					return e;
 				}
 			}

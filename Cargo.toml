@@ -26,5 +26,6 @@ log = "0.4.22"
 nix = { version = "0.26.4", features = ["socket"] }
 pamsm = { version = "0.5", features = ["libpam"] }
 rustbus = "0.19.3"
+secrecy = "0.10.3"
 serde = { version = "1.0.210", features = ["derive"] }
 syslog = "7.0.0"
