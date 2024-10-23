@@ -49,16 +49,14 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 	result
 }
 
-use nix::unistd::{fork, ForkResult};
-
 /**
  * Perform a double fork to detach the process and avoid zombie processes.
 **/
 #[cfg(feature = "session")]
-fn double_fork() -> Result<ForkResult> {
+fn double_fork() -> Result<nix::unistd::ForkResult> {
 	use nix::{
 		sys::wait::waitpid,
-		unistd::{close, setsid},
+		unistd::{close, fork, setsid, ForkResult},
 	};
 
 	unsafe {
@@ -219,15 +217,16 @@ pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
 
 	let start = Instant::now();
 	let conn = loop {
-		match RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite) {
-			Ok(conn) => break conn,
-			Err(_) => {
-				if start.elapsed() >= TIMEOUT {
-					return Err(anyhow!("Timed out."));
-				}
-				sleep(INTERVAL)
-			}
+		if let Ok(conn) =
+			RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite)
+		{
+			break conn;
 		}
+
+		if start.elapsed() >= TIMEOUT {
+			return Err(anyhow!("Timed out."));
+		}
+		sleep(INTERVAL);
 	};
 
 	Ok(conn)
@@ -269,6 +268,8 @@ fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 impl PamServiceModule for PamKeePassXC {
 	#[cfg(feature = "session")]
 	fn open_session(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
+		use nix::unistd::ForkResult;
+
 		let _ = init_syslog();
 		let data = match pamh.retrieve_bytes(MODULE_NAME) {
 			Err(e) => return e,
