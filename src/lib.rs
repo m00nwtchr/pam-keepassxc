@@ -208,8 +208,14 @@ pub fn activate(conn: &mut RpcConn) -> Result<()> {
 	Ok(())
 }
 
+pub fn user_session_bus(user: &User) -> Result<UnixAddr> {
+	Ok(UnixAddr::new(
+		format!("/run/user/{}/bus", user.uid).as_str(),
+	)?)
+}
+
 pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
-	let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid).as_str())?;
+	let socket_addr = user_session_bus(user)?;
 
 	let start = Instant::now();
 	let conn = loop {
@@ -228,9 +234,7 @@ pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
 
 fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 	let mut conn = if flag {
-		let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid).as_str())?;
-
-		RpcConn::connect_to_path(socket_addr, Timeout::Duration(TIMEOUT))?
+		RpcConn::connect_to_path(user_session_bus(&user)?, Timeout::Duration(TIMEOUT))?
 	} else {
 		wait_for_dbus(user)?
 	};
