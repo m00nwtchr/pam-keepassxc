@@ -213,9 +213,7 @@ pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
 
 	let start = Instant::now();
 	let conn = loop {
-		if let Ok(conn) =
-			RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite)
-		{
+		if let Ok(conn) = RpcConn::connect_to_path(socket_addr, Timeout::Duration(TIMEOUT)) {
 			break conn;
 		}
 
@@ -232,7 +230,7 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 	let mut conn = if flag {
 		let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid).as_str())?;
 
-		RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite)?
+		RpcConn::connect_to_path(socket_addr, Timeout::Duration(TIMEOUT))?
 	} else {
 		wait_for_dbus(user)?
 	};
