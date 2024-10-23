@@ -45,15 +45,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fork"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05dc8b302e04a1c27f4fe694439ef0f29779ca4edc205b7b58f00db04e29656d"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "hostname"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,14 +116,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "basic-toml",
- "fork",
  "log",
  "nix",
  "pamsm",
  "rustbus",
  "serde",
  "syslog",
- "users",
 ]
 
 [[package]]
@@ -308,15 +297,6 @@ name = "unicode-ident"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91b56cd4cadaeb79bbf1a5645f6b4f8dc5bde8834ad5894a8db35fda9efa1fe"
-
-[[package]]
-name = "users"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24cc0f6d6f267b73e5a2cadf007ba8f9bc39c6a6f9666f8cf25ea809a153b032"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "windows"

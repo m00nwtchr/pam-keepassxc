@@ -1,6 +1,5 @@
 #![warn(clippy::pedantic)]
 use std::{
-	collections::HashMap,
 	fs,
 	process::exit,
 	thread::sleep,
@@ -8,26 +7,15 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-#[cfg(feature = "session")]
-use fork::{close_fd, fork, setsid, waitpid, Fork};
-use log::{error, info, warn};
-use nix::sys::socket::UnixAddr;
+use log::{error, warn};
+use nix::{sys::socket::UnixAddr, unistd::User};
 use pamsm::{pam_module, LogLvl, Pam, PamError, PamFlags, PamLibExt, PamServiceModule};
 use rustbus::{
 	connection::Timeout,
-	message_builder::MarshalledMessageBody,
-	params::{Base, DictMap, Param},
-	signature,
 	wire::{unmarshal::traits::Variant, ObjectPath},
 	MessageBuilder, RpcConn, Signature, Unmarshal,
 };
 use serde::Deserialize;
-use users::{
-	get_current_gid, get_current_uid,
-	os::unix::UserExt,
-	switch::{set_both_gid, set_both_uid, set_effective_gid, set_effective_uid},
-	User,
-};
 
 const MODULE_NAME: &str = "pam_keepassxc";
 
@@ -40,7 +28,7 @@ struct UserConfig {
 
 fn user_config(user: &User) -> Option<UserConfig> {
 	let config_path = user
-		.home_dir()
+		.dir
 		.join(".config")
 		.join("security")
 		.join(MODULE_NAME)
@@ -50,7 +38,7 @@ fn user_config(user: &User) -> Option<UserConfig> {
 }
 
 fn database_path(user: &User, config: &UserConfig) -> String {
-	let home_dir = user.home_dir().to_str().expect("");
+	let home_dir = user.dir.to_str().expect("");
 
 	let mut result = config.database_path.replace("$HOME", home_dir);
 	if result.starts_with('~') {
@@ -61,28 +49,40 @@ fn database_path(user: &User, config: &UserConfig) -> String {
 	result
 }
 
+use nix::unistd::{fork, ForkResult};
+
 /**
  * Perform a double fork to detach the process and avoid zombie processes.
 **/
 #[cfg(feature = "session")]
-fn double_fork() -> Result<Fork, i32> {
-	match fork() {
-		Ok(Fork::Parent(pid)) => {
-			let _ = waitpid(pid); // Wait for the first child process to exit.
+fn double_fork() -> Result<ForkResult> {
+	use nix::{
+		sys::wait::waitpid,
+		unistd::{close, setsid},
+	};
 
-			Ok(Fork::Parent(pid))
-		}
-		Ok(Fork::Child) => {
-			let _ = setsid();
-			let _ = close_fd();
+	unsafe {
+		match fork() {
+			Ok(ForkResult::Parent { child, .. }) => {
+				let _ = waitpid(child, None); // Wait for the first child process to exit.
 
-			// Fork again to create the grandchild process.
-			match fork() {
-				Ok(Fork::Child) => Ok(Fork::Child),
-				_ => exit(0),
+				Ok(ForkResult::Parent { child })
 			}
+			Ok(ForkResult::Child) => {
+				let _ = setsid();
+
+				let _ = close(0);
+				let _ = close(1);
+				let _ = close(2);
+
+				// Fork again to create the grandchild process.
+				match fork() {
+					Ok(ForkResult::Child) => Ok(ForkResult::Child),
+					_ => exit(0),
+				}
+			}
+			Err(err) => Err(anyhow!("{}", err)),
 		}
-		a => a,
 	}
 }
 
@@ -215,7 +215,7 @@ pub fn activate(conn: &mut RpcConn) -> Result<()> {
 }
 
 pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
-	let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid()).as_str())?;
+	let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid).as_str())?;
 
 	let start = Instant::now();
 	let conn = loop {
@@ -235,7 +235,7 @@ pub fn wait_for_dbus(user: &User) -> Result<RpcConn> {
 
 fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
 	let mut conn = if flag {
-		let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid()).as_str())?;
+		let socket_addr = UnixAddr::new(format!("/run/user/{}/bus", user.uid).as_str())?;
 
 		RpcConn::connect_to_path(socket_addr, rustbus::connection::Timeout::Infinite)?
 	} else {
@@ -254,11 +254,13 @@ fn try_unlock(flag: bool, user: &User, user_config: &UserConfig, pass: &str) -> 
 
 #[cfg(feature = "session")]
 fn grandchild(user: &User, user_config: &UserConfig, pass: &str) -> Result<()> {
-	let _ = set_effective_uid(get_current_uid());
-	let _ = set_effective_gid(get_current_gid());
+	use nix::unistd::{getgid, getuid, setgid, setresgid, setresuid, setuid};
 
-	let _ = set_both_gid(user.primary_group_id(), user.primary_group_id());
-	let _ = set_both_uid(user.uid(), user.uid());
+	let _ = setuid(getuid());
+	let _ = setgid(getgid());
+
+	let _ = setresgid(user.gid, user.gid, user.gid);
+	let _ = setresuid(user.uid, user.uid, user.uid);
 
 	try_unlock(false, user, user_config, pass)?;
 	Ok(())
@@ -282,9 +284,9 @@ impl PamServiceModule for PamKeePassXC {
 		.expect("Failed to send syslog");
 
 		let user = match pamh.get_user(None) {
-			Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
-				Some(u) => u,
-				None => return PamError::USER_UNKNOWN,
+			Ok(Some(u)) => match User::from_name(u.to_str().expect("")) {
+				Ok(Some(u)) => u,
+				_ => return PamError::USER_UNKNOWN,
 			},
 			Ok(None) => return PamError::USER_UNKNOWN,
 			Err(e) => return e,
@@ -295,11 +297,11 @@ impl PamServiceModule for PamKeePassXC {
 		};
 
 		match double_fork() {
-			Ok(Fork::Parent(pid)) => {
-				pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {pid}"))
+			Ok(ForkResult::Parent { child, .. }) => {
+				pamh.syslog(LogLvl::WARNING, &format!("Forked with PID: {child}"))
 					.expect("Failed to send syslog");
 			}
-			Ok(Fork::Child) => {
+			Ok(ForkResult::Child) => {
 				// Grandchild process that waits for the D-Bus service to be ready.
 				let _ = grandchild(&user, &user_config, &pass);
 				exit(0)
@@ -317,9 +319,9 @@ impl PamServiceModule for PamKeePassXC {
 	fn authenticate(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
 		let _ = init_syslog();
 		let user = match pamh.get_user(None) {
-			Ok(Some(u)) => match users::get_user_by_name(u.to_str().expect("")) {
-				Some(u) => u,
-				None => return PamError::USER_UNKNOWN,
+			Ok(Some(u)) => match User::from_name(u.to_str().expect("")) {
+				Ok(Some(u)) => u,
+				_ => return PamError::USER_UNKNOWN,
 			},
 			Ok(None) => return PamError::USER_UNKNOWN,
 			Err(e) => return e,
