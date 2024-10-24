@@ -50,7 +50,7 @@ pub fn try_unlock(
 	pass: &SecretString,
 ) -> Result<()> {
 	let mut conn = if flag {
-		RpcConn::connect_to_path(user_session_bus(&user)?, Timeout::Duration(TIMEOUT))?
+		RpcConn::connect_to_path(user_session_bus(user)?, Timeout::Duration(TIMEOUT))?
 	} else {
 		wait_for_dbus(user)?
 	};

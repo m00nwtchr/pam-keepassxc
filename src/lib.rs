@@ -1,4 +1,5 @@
 #![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
 use anyhow::{anyhow, Result};
 use log::{error, warn};
 use nix::unistd::User;
@@ -48,7 +49,7 @@ fn double_fork() -> Result<nix::unistd::ForkResult> {
 }
 
 #[cfg(feature = "session")]
-fn grandchild(user: &User, user_config: &UserConfig, pass: SecretString) -> Result<()> {
+fn grandchild(user: &User, user_config: &UserConfig, pass: &SecretString) -> Result<()> {
 	use nix::unistd::{getgid, getuid, setgid, setresgid, setresuid, setuid};
 
 	let _ = init_syslog(); // Reinitialize syslog for new PID
@@ -59,7 +60,7 @@ fn grandchild(user: &User, user_config: &UserConfig, pass: SecretString) -> Resu
 	let _ = setresgid(user.gid, user.gid, user.gid);
 	let _ = setresuid(user.uid, user.uid, user.uid);
 
-	try_unlock(false, user, user_config, &pass)?;
+	try_unlock(false, user, user_config, pass)?;
 	Ok(())
 }
 
@@ -120,11 +121,11 @@ impl PamServiceModule for PamKeePassXC {
 
 		match double_fork() {
 			Ok(ForkResult::Parent { child, .. }) => {
-				warn!("Forked with PID: {child}")
+				warn!("Forked with PID: {child}");
 			}
 			Ok(ForkResult::Child) => {
 				// Grandchild process that waits for the D-Bus service to be ready.
-				let _ = grandchild(&user, &user_config, pass);
+				let _ = grandchild(&user, &user_config, &pass);
 				std::process::exit(0)
 			}
 			Err(_) => {}
